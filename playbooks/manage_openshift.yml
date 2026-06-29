@@ -1,24 +1,49 @@
 ---
-    # 1. CẤU HÌNH USER VÀ RBAC (RoleBinding)
-    - name: Bind admin role to the user within the project
+- name: OpenShift Administration and Automation Playbook (Developer Sandbox)
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    # Định nghĩa chính xác Namespace được cấp trên OpenShift Sandbox
+    target_project: "nguyentaihieu004-dev"
+    app_name: "web-demo-app"
+    db_password: "SuperSecretPassword123"
+    
+    # Định nghĩa thông tin RBAC cục bộ hợp lệ trong Namespace
+    service_account_name: "demo-automation-sa"
+    binding_name: "demo-view-binding"
+
+  tasks:
+    # 1. CẤU HÌNH TỰ ĐỘNG HÓA RBAC (Tạo ServiceAccount và gán quyền cục bộ trong Namespace)
+    - name: Create a local ServiceAccount for automation tasks
+      kubernetes.core.k8s:
+        definition:
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: "{{ service_account_name }}"
+            namespace: "{{ target_project }}"
+        state: present
+
+    - name: Bind view role to the ServiceAccount (Allowed within local namespace)
       kubernetes.core.k8s:
         definition:
           apiVersion: rbac.authorization.k8s.io/v1
           kind: RoleBinding
           metadata:
-            name: "{{ admin_user }}-admin-binding"
+            name: "{{ binding_name }}"
             namespace: "{{ target_project }}"
           subjects:
-            - kind: User
-              name: "{{ admin_user }}"
-              apiGroup: rbac.authorization.k8s.io
+            - kind: ServiceAccount
+              name: "{{ service_account_name }}"
+              namespace: "{{ target_project }}"
           roleRef:
             kind: ClusterRole
-            name: admin
+            name: view # Sử dụng quyền view chuẩn (Hợp lệ với quyền hạn Developer)
             apiGroup: rbac.authorization.k8s.io
         state: present
 
-    # 2. TẠO SECRET (Mã hóa Base64 tự động bằng module)
+    # 2. TẠO SECRET (Mã hóa Base64 tự động bằng biến stringData)
     - name: Create Application Secret for Database Connection
       kubernetes.core.k8s:
         definition:
@@ -32,7 +57,7 @@
             DATABASE_PASSWORD: "{{ db_password }}"
         state: present
 
-    # 3. TRIỂN KHAI ỨNG DỤNG (Deployment & Cấu hình môi trường)
+    # 3. TRIỂN KHAI ỨNG DỤNG (Bao gồm cấu hình Biến môi trường và Giới hạn tài nguyên)
     - name: Deploy Web Application with Environment Variables
       kubernetes.core.k8s:
         definition:
@@ -55,10 +80,18 @@
               spec:
                 containers:
                   - name: web-container
-                    image: quay.io/donnydavis/openshift-hello:latest # Image ứng dụng demo
+                    image: quay.io/donnydavis/openshift-hello:latest
                     ports:
                       - containerPort: 8080
-                    # Cấu hình biến môi trường lấy từ Secret đã tạo ở trên
+                    # Giới hạn tài nguyên giúp tối ưu và không bị kẹt Quota của Sandbox
+                    resources:
+                      limits:
+                        cpu: "200m"
+                        memory: "256Mi"
+                      requests:
+                        cpu: "100m"
+                        memory: "128Mi"
+                    # Cấu hình biến môi trường lấy trực tiếp từ Secret
                     env:
                       - name: APP_ENV
                         value: "Development"
@@ -69,7 +102,7 @@
                             key: DATABASE_PASSWORD
         state: present
 
-    # 4. TẠO SERVICE NỘI BỘ
+    # 4. TẠO SERVICE NỘI BỘ (East-West Traffic)
     - name: Create Internal Cluster Service for the App
       kubernetes.core.k8s:
         definition:
@@ -104,10 +137,10 @@
             port:
               targetPort: 8080
             tls:
-              termination: edge # Tự động cấu hình SSL/TLS termination tại Router
+              termination: edge # Tự động kích hoạt SSL/TLS termination tại Edge Router
         state: present
 
-    # ĐOẠN CUỐI: LẤY URL ROUTE ĐỂ KIỂM TRA
+    # ĐOẠN CUỐI: TRÍCH XUẤT VÀ KIỂM TRA ĐƯỜNG DẪN ỨNG DỤNG
     - name: Fetch the generated Route URL
       kubernetes.core.k8s_info:
         api_version: route.openshift.io/v1
