@@ -1,0 +1,121 @@
+---
+    # 1. CẤU HÌNH USER VÀ RBAC (RoleBinding)
+    - name: Bind admin role to the user within the project
+      kubernetes.core.k8s:
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: RoleBinding
+          metadata:
+            name: "{{ admin_user }}-admin-binding"
+            namespace: "{{ target_project }}"
+          subjects:
+            - kind: User
+              name: "{{ admin_user }}"
+              apiGroup: rbac.authorization.k8s.io
+          roleRef:
+            kind: ClusterRole
+            name: admin
+            apiGroup: rbac.authorization.k8s.io
+        state: present
+
+    # 2. TẠO SECRET (Mã hóa Base64 tự động bằng module)
+    - name: Create Application Secret for Database Connection
+      kubernetes.core.k8s:
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: app-db-secret
+            namespace: "{{ target_project }}"
+          type: Opaque
+          stringData:
+            DATABASE_PASSWORD: "{{ db_password }}"
+        state: present
+
+    # 3. TRIỂN KHAI ỨNG DỤNG (Deployment & Cấu hình môi trường)
+    - name: Deploy Web Application with Environment Variables
+      kubernetes.core.k8s:
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: "{{ app_name }}"
+            namespace: "{{ target_project }}"
+            labels:
+              app: "{{ app_name }}"
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: "{{ app_name }}"
+            template:
+              metadata:
+                labels:
+                  app: "{{ app_name }}"
+              spec:
+                containers:
+                  - name: web-container
+                    image: quay.io/donnydavis/openshift-hello:latest # Image ứng dụng demo
+                    ports:
+                      - containerPort: 8080
+                    # Cấu hình biến môi trường lấy từ Secret đã tạo ở trên
+                    env:
+                      - name: APP_ENV
+                        value: "Development"
+                      - name: DB_PASS
+                        valueFrom:
+                          secretKeyRef:
+                            name: app-db-secret
+                            key: DATABASE_PASSWORD
+        state: present
+
+    # 4. TẠO SERVICE NỘI BỘ
+    - name: Create Internal Cluster Service for the App
+      kubernetes.core.k8s:
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: "{{ app_name }}-svc"
+            namespace: "{{ target_project }}"
+            labels:
+              app: "{{ app_name }}"
+          spec:
+            ports:
+              - port: 8080
+                targetPort: 8080
+            selector:
+              app: "{{ app_name }}"
+        state: present
+
+    # 5. TẠO ROUTE PHÁT HÀNH ỨNG DỤNG RA NGOÀI (Đặc trưng của OpenShift)
+    - name: Expose Service via OpenShift Route
+      kubernetes.core.k8s:
+        definition:
+          apiVersion: route.openshift.io/v1
+          kind: Route
+          metadata:
+            name: "{{ app_name }}-route"
+            namespace: "{{ target_project }}"
+          spec:
+            to:
+              kind: Service
+              name: "{{ app_name }}-svc"
+            port:
+              targetPort: 8080
+            tls:
+              termination: edge # Tự động cấu hình SSL/TLS termination tại Router
+        state: present
+
+    # ĐOẠN CUỐI: LẤY URL ROUTE ĐỂ KIỂM TRA
+    - name: Fetch the generated Route URL
+      kubernetes.core.k8s_info:
+        api_version: route.openshift.io/v1
+        kind: Route
+        name: "{{ app_name }}-route"
+        namespace: "{{ target_project }}"
+      register: route_info
+
+    - name: Display Application URL
+      ansible.builtin.debug:
+        msg: "Your application is ready at: https://{{ route_info.resources[0].spec.host }}"
